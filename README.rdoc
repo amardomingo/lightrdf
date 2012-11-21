@@ -4,7 +4,7 @@
 
 == DESCRIPTION:
 
-LightRDF is a gem that makes managing RDF data and graphs easily with a Ruby interface.
+LightRDF is a gem that makes managing RDF data and graphs easy, with a Ruby interface.
 
 == INSTALL:
 
@@ -15,8 +15,7 @@ for outputting different RDF serialization formats.
 
 Additionally, PNG output of RDF graphs requires Graphviz (in Debian systems: sudo aptitude install graphviz).
 
-Also, if you want to use the repository and Sesame functionality, Sesame must be installed.
-You can find furhter instructions in http://openrdf.org
+Also, if you want to use the repository and Sesame functionality, Sesame must be installed. You can find furhter instructions at http://openrdf.org
 
 == RDF NODES:
 
@@ -57,7 +56,7 @@ If you want to get the property, an array will be returned, as many foaf::name's
 Therefore, we can add multiple values to a property:
 
   user.foaf::weblog = Node('http://www.awesomeweblogfordummies.com')
-  user.foaf::weblog << Node('http://www.anotherawesomeweblogfordummies.com')
+  user.foaf::weblog += [Node('http://www.anotherawesomeweblogfordummies.com')]
   user.foaf::weblog.size # => 2
   user.foaf::weblog?(Node('http://www.awesomeweblogfordummies.com'))  # => true
 
@@ -104,6 +103,52 @@ Also, queries for triples can be performed on a graph:
   # Find all predicates bob has
   g.find(Node('ex:bob'), nil, []) # => [Node('foaf:name'), Node('foaf:age')]
 
+== INSTANTIATING OBJECTS:
+
+LightRDF allows defining a class hierarchy that is instantiated using RDF data. Simply match
+modules to prefix names and classes to RDF types and include RDF::NodeProxy:
+
+  module Foaf
+    class Person
+      include RDF::NodeProxy
+      # Optionally, you can specify the mapped URI:
+      # maps 'foaf:Person'
+      # or
+      # maps 'http://xmlns.com/foaf/0.1/Person'
+  
+      # Adds 1 year to the person's age
+      def happy_birthday!
+        foaf::age = (foaf::age.first.to_i + 1).to_s
+      end
+    end
+  end
+
+This class can be instantiated by passing an RDF node or a hash with predicates:
+
+  Foaf::Person.new.rdf::type # => [Node("http://xmlns.com/foaf/0.1/Person")]
+  
+  person_node = Node(nil)
+  person_node.rdf::type = Node('foaf:Person')
+  person_node.foaf::age = "19"
+  person = Foaf::Person.new(person_node)
+  person.foaf::age # => ["19"]
+  
+  person = Foaf::Person.new('foaf:age'=>"25")
+  person.happy_birthday!
+  person.foaf::age # => ["26"]
+
+Also, you can use Graph#node to get instances of class Person out of an RDF graph:
+  
+  graph       = RDF::Graph.new
+  person_node = Node(nil)
+  person_node.rdf::type = Node('foaf:Person')
+  person_node.foaf::age = "25"
+  graph << person_node
+  
+  person = graph.node(person_node)
+  person.happy_birthday!
+  person.foaf::age # => ["26"]
+
 == PARSING AND SERIALIZING:
 
 LightRDF uses Raptor library internally to support many RDF formats. It also introduces
@@ -144,28 +189,41 @@ graphs and serialized using the parse and serialize methods:
 
 LightRDF can use a Sesame repository to save the RDF data.
 The Sesame options are configured when creating the repository
-  r_opt={"host"=>"http://localhost", "port"=>"8080", "repo"=>"men-ses",
-   "time"=>"15", "format"=>"ntriples"}
-   repo = RDF::Repository.new{r_opt}
+  
+  repository = RDF::Repository.new :host=>"http://localhost", :port=>8080, :repository=>"memory"
 
-If any of the values is missing, the default value will be used.
+If any of the values is missing, the values above will be used by default.
 
 You have three ways of comunicating with Sesame:
-- You can ask Sesame for the list of all the context in the repository, by using the get_context Repository method.
+- You can ask Sesame for the list of all the contexts in the repository:
   
-  repo = RDF::Repository.new(r_opt)
-  repo.get_context
+    repository = RDF::Repository.new
+    repository.contexts
   
-- You can ask Sesame for all the data in several contexts, using the get_data method, which returns a RDF Graph
+- You can ask Sesame for all the data in several contexts, using the data method, which returns an RDF Graph:
 
-  repo = RDF::Repository.new(r_opt)
-  repo = repo.get_data(["test_context1", "test_context2"])
-  repo = repo.get_data(["test_context3"])
+    repository = RDF::Repository.new
+    repository = repository.data "test:context1", "test:context2"
+    repository = repository.data "test:context3"
+    repository = repository.data # Return all data in the repository
   
-- You can ask Sesame for including data in a certain context, using the post_data method, passing a RDF Graph as a parameter.
+- You can ask Sesame for including data in a certain context, using the data= method, passing an RDF Graph as a parameter.
 
-  repo = RDF::Repository.new(r_opt)
-  repo = repo.post_data(graph,context)
+    repository = RDF::Repository.new
+    context = "test:context4"
+    repository.data = graph, context # Associate graph to "test:context4"
+    repository.data = graph # In this case, data has no associated context
+
+- You can easily make SPARQL queries by just typing the "WHERE" part of the statement:
+    
+    repository = RDF::Repository.new
+    repository.query '?q rdfs:label "john"'
+
+== CONTRIBUTORS:
+
+* José Ignacio Fernández
+
+* Alberto Mardomingo
 
 == LICENSE:
 
