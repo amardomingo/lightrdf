@@ -11,44 +11,53 @@ module RDF
 
       case format.to_sym
       when :ntriples
-        triples.map { |s,p,o| "#{serialize_chunk_ntriples(s)} #{serialize_chunk_ntriples(p)} #{serialize_chunk_ntriples(o)} ." } * "\n"
+        triples.map { |s,p,o| "#{serialize_chunk_ntriples(s)} #{serialize_chunk_ntriples(p)} #{serialize_chunk_ntriples(o)} .\n" } * ''
       when :yarf
-        ns = respond_to?(:ns) ? QURI.ns.merge(self.ns) : QURI.ns
+        ns = respond_to?(:ns) ? ID.ns.merge(self.ns) : ID.ns
         if header
-          (ns.map{|k,v| "#{k}: #{v}\n"} * '') + serialize_yarf(nodes, ns)
+          used_ns = {}
+          triples.flatten.select { |node| node.is_a?(Symbol) and ID.uri?(node) }.each do |uri|
+            prefix = ID.compress(uri).split(':').first.to_sym
+            used_ns[prefix] = ns[prefix] if ns[prefix]
+          end
+          (used_ns.map{|k,v| "#{k}: #{v}\n"} * '') + serialize_yarf(nodes, ns)
         else
           serialize_yarf(nodes, ns)
         end
       when :ejson
-        stdin, stdout, stderr = Open3.popen3("python -mjson.tool")
-        stdin.puts ActiveSupport::JSON.encode(serialize_ejson(nodes))
-        stdin.close
-        stdout.read
+        RDF::Parser.run "python -mjson.tool", ActiveSupport::JSON.encode(serialize_ejson(nodes))
       when :png
         dot = serialize(:dot)
-        ns = respond_to?(:ns) ? QURI.ns.merge(self.ns) : QURI.ns
+        ns = respond_to?(:ns) ? ID.ns.merge(self.ns) : ID.ns
         ns.each { |k,v| dot.gsub!(v, "#{k}:") }
         dot.gsub!(/label=\"\\n\\nModel:.*\)\";/, '')
-        stdin, stdout, stderr = Open3.popen3("dot -o/dev/stdout -Tpng")
-        stdin.puts dot
-        stdin.close
-        stdout.read
+
+        RDF::Parser.run "dot -o/dev/stdout -Tpng", dot
       when :rdf
-        serialize(:rdfxml)
+        serialize(:'rdfxml-abbrev')
       else
-        tmpfile = File.join(Dir.tmpdir, "rapper#{$$}#{Thread.current.object_id}")
-        File.open(tmpfile, 'w') { |f| f.write(serialize(:ntriples)) }
-        %x[rapper -q -i ntriples -o #{format} #{tmpfile}]
+        namespaces = if [:rdfxml, :'rdfxml-abbrev'].include?(format)
+          ns = respond_to?(:ns) ? ID.ns.merge(self.ns) : ID.ns
+          used_ns = {}
+          triples.flatten.select { |node| node.is_a?(Symbol) and ID.uri?(node) }.each do |uri|
+            prefix = ID.compress(uri).split(':').first.to_sym
+            used_ns[prefix] = ns[prefix] if ns[prefix]
+          end
+          used_ns.map {|k,v| "-f 'xmlns:#{k}=#{v.inspect}'" } * " "
+        end
+        tempfile = RDF::Parser.new_tempfile
+        File.open(tempfile, 'w') { |f| f.write(serialize(:ntriples)) }
+        %x[rapper -q -i ntriples #{namespaces} -o #{format} #{tempfile} 2> /dev/null]
       end
     end
 
-    def self.parse format, text
+    def self.parse format, text, uri=nil
       case format
       when :ntriples
         graph = RDF::Graph.new
         graph.triples = text.split("\n").select{|l| l.strip!=''}.map do |l|
-          s, p, o = l.strip.match(/\A(<\S+>|".*"|_:\w+)\s+(<\S+>|".*"|_:\w+)\s+(<\S+>|".*"|_:\w+)\s+\.\Z/).captures
-          [parse_chunk_ntriples(s), parse_chunk_ntriples(p), parse_chunk_ntriples(o)]
+          s, lang1, p, lang2, o, lang3 = l.strip.match(/\A(<\S+>|".*"(@\w+)?|_:\w+)\s+(<\S+>|".*"(@\w+)?|_:\w+)\s+(<\S+>|".*"(@\w+)?|_:\w+)\s+\.\Z/).captures
+          [parse_chunk_ntriples(s,uri), parse_chunk_ntriples(p,uri), parse_chunk_ntriples(o,uri)]
         end
         graph
       when :yarf
@@ -72,13 +81,9 @@ module RDF
       when :ejson
         raise Exception, "eJSON format cannot be parsed (yet)"
       else
-        begin
-          stdin, stdout, stderr = Open3.popen3("rapper -q -i #{format} -o ntriples /dev/stdin")
-          stdin.puts text
-          stdin.close
-        rescue
-        end
-        parse :ntriples, stdout.read
+        tempfile = new_tempfile
+        File.open(tempfile, 'w') { |f| f.write text }
+        parse :ntriples, %x[rapper -q -i #{format} -o ntriples #{tempfile} 2> /dev/null], uri
       end
     end
 
@@ -90,7 +95,7 @@ module RDF
         if level == base_level
           nodes << if line =~ /\A(".*")\Z/ # Literal
             i += 1
-            ActiveSupport::JSON.decode($1)
+            parse_string($1)
           elsif line =~ /\A(.+):\Z/ # Node with relations
             node = Node(ID($1, ns), graph)
             i, relations = parse_yarf_relations(lines, graph, ns, level+1, i+1)
@@ -117,7 +122,7 @@ module RDF
         if level == base_level
           relations += if line =~ /\A(.+):\s+(".+")\Z/ # Predicate and literal
             i += 1
-            [[Node(ID($1, ns), graph), ActiveSupport::JSON.decode($2)]]
+            [[Node(ID($1, ns), graph), parse_string($2)]]
           elsif line =~ /\A(.+):\s+(.+)\Z/ # Predicate and node
             i += 1
             [[Node(ID($1, ns), graph), Node(ID($2, ns), graph)]]
@@ -135,7 +140,7 @@ module RDF
       [i, relations]
     end
 
-    def serialize_yarf nodes, ns=QURI.ns, level=0, already_serialized=[]
+    def serialize_yarf nodes, ns=ID.ns, level=0, already_serialized=[]
       text = ""
 
       for node in nodes
@@ -147,9 +152,10 @@ module RDF
         else
           already_serialized << node
           text += ":\n"
-          node.predicates.each do |p, o| # Predicate and object
+          node.predicates.each do |p, o| # Predicate and objects
+            next if o.empty?
             text += " " *(level+1)*2
-            text += p.id.compressed(ns)
+            text += ID.compress(p.id, ns)
             text += ":"
             if o.size == 1 and (already_serialized.include?(o.first) or !o.first.is_a?(Node) or o.first.triples.size==0)
               text += " " + serialize_chunk_yarf(o.first, ns)
@@ -163,7 +169,7 @@ module RDF
       text
     end
     
-    def serialize_chunk_yarf node, ns=QURI.ns
+    def serialize_chunk_yarf node, ns=ID.ns
       if node.is_a?(Node)
         if node.bnode?
           if node.graph.find(nil, [], node).size > 1 # Only use a bnode-id if it appears again as object
@@ -172,7 +178,7 @@ module RDF
             "*"
           end
         else
-          node.id.compressed ns
+          ID.compress(node.id, ns)
         end
       else
         ActiveSupport::JSON.encode(node)
@@ -203,22 +209,43 @@ module RDF
     end
 
     def serialize_chunk_ntriples n
-      if n.is_a? Node 
-        n.bnode? ? n.to_s : "<#{n}>"
+      if n.is_a? Symbol 
+        ID.bnode?(n) ? n.to_s : "<#{n}>"
       else
         ActiveSupport::JSON.encode(n)
       end
     end
   
-    def self.parse_chunk_ntriples c
+    def self.parse_chunk_ntriples c, uri=nil
       case c[0..0]
-      when '<' then Node c[1..-2]
+      when '<' then
+        if uri
+          Node(URI::parse(uri).merge(c[1..-2]).to_s)
+        else
+          Node c[1..-2]
+        end
       when '_' then Node c
       when '"' then
-        ActiveSupport::JSON.decode(c)
+        parse_string(c.match(/\A(\".*\")(@\w+)?\Z/).captures.first)
       else
         raise Exception, "Parsing error: #{c}"
       end
+    end
+    
+    def self.run program, input
+      tempfile = new_tempfile
+      File.open(tempfile, 'w') { |f| f.write(input) }
+      %x[#{program} < #{tempfile}]
+    end
+
+    def self.new_tempfile
+      @num_tempfile ||= 0
+      @num_tempfile  += 1
+      File.join(Dir.tmpdir, "lightrdf-#{@num_tempfile}-#{$$}#{Thread.current.object_id}")
+    end
+    
+    def self.parse_string string
+      ActiveSupport::JSON.decode("[#{string}]").first
     end
   end
 end

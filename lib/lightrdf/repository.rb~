@@ -5,7 +5,6 @@ module RDF
   
     def initialize options={}
       super()
-      @debug = false
       
       # Assigns the default value to the options.
       @options = {:host=>"http://localhost", :port=>8080, :repository=>"memory", :format=>:ntriples, :complete=>"openrdf-sesame/repositories"}.merge(options)
@@ -51,42 +50,30 @@ module RDF
         # Prepares the dir to connect with the repository
         url  = "#{repository_statements_url(@options[:repository])}"
         url += "?context=%3C#{CGI::escape(context)}%3E" if context
+        puts @options[:format].to_sym
         
-        if @options[:sesame]
-          puts "sesame..." if @debug
-          # For some reason, sesame doesn't like rdfxml
-          sesame_data =  graph.serialize :ntriples
+        # For some reason, sesame doesn't like rdfxml
+        sesame_data =  graph.serialize :ntriples
 	
-          # Sesame:
-          begin
-            RestClient.post url, sesame_data, :content_type=>content_type
-          rescue
-            puts "error accesing server" if @debug
-          end
-        end
-	
-        if @options[:omr]
-          puts "omr..." if @debug
-          # OMR:
-          omr_data = graph.serialize :rdf
-          omrurl= omr_url
-   	      
-          request = RestClient::Request.new(:method => :post, :url => omrurl, :user => @options[:omr_user], :password => @options[:omr_pass], :payload=> omr_data, :verify_ssl => false)
+        # Sesame:
+        RestClient.post url, sesame_data, :content_type=>content_type
+	    
+        # OMR:
+        omr_data = graph.serialize :rdf
+	      omrurl= omr_url
+	      
+        request = RestClient::Request.new(:method => :post, :url => omrurl, :user => @options[:omr_user], :password => @options[:omr_pass], :payload=> omr_data, :verify_ssl => false)
         
-          if @debug
-            puts "url: #{omr_url}"
-            puts "user: #{@options[:omr_user]}"
-            puts "pass: #{@options[:omr_pass]}"
-            puts @options[:format].to_sym
-            puts "data:\n#{data}"
-          end
-          # Adds the data to OMR
-          begin
-            response = request.execute
-            puts "Data Added!" if @debug
-          rescue
-            puts "Badrequest" if @debug
-          end
+        puts "url: #{omr_url}"
+        puts "user: #{@options[:omr_user]}"
+        puts "pass: #{@options[:omr_pass]}"
+        puts "data:\n#{data}"
+        # Adds the data to OMR
+        begin
+        	response = request.execute
+          puts "Data Added!"
+        rescue
+          puts "Badrequest"
         end
       end
     end
